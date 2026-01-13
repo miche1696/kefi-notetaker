@@ -25,6 +25,8 @@ frontend/build/
 *.swp
 *.swo
 *~
+.claude/
+.cursor/
 
 # OS
 .DS_Store
@@ -37,3 +39,6 @@ uploads/*
 # Notes (user data - optional, remove if you want to version control notes)
 notes/*
 !notes/welcome.txt
+
+# Logs
+*.log

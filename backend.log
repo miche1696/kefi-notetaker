@@ -337,3 +337,5 @@ Uploads directory: /Users/michelegionfriddo/Projects/PROJECT_ME/uploads
 127.0.0.1 - - [13/Jan/2026 23:01:20] "GET /api/notes HTTP/1.1" 200 -
 127.0.0.1 - - [13/Jan/2026 23:01:21] "GET /api/folders HTTP/1.1" 200 -
 127.0.0.1 - - [13/Jan/2026 23:01:21] "GET /api/notes HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jan/2026 23:03:01] "GET /api/notes HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jan/2026 23:03:01] "GET /api/folders HTTP/1.1" 200 -
