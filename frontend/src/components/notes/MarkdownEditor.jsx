@@ -13,6 +13,7 @@ import {
   markdownShortcutPlugin,
   toolbarPlugin,
   BoldItalicUnderlineToggles,
+  HighlightToggle,
   BlockTypeSelect,
   CreateLink,
   ListsToggle,
@@ -468,6 +469,7 @@ const MarkdownEditor = forwardRef(({
           className="mdx-editor-root"
           markdown={initialContent !== undefined ? initialContent : (content || '')}
           onChange={handleEditorChange}
+          suppressHtmlProcessing={true}
           contentEditableClassName="mdx-editor-content"
           plugins={[
             headingsPlugin(),
@@ -513,6 +515,7 @@ const MarkdownEditor = forwardRef(({
                   <BlockTypeSelect />
                   <Separator />
                   <BoldItalicUnderlineToggles />
+                  <HighlightToggle />
                   <Separator />
                   <ListsToggle />
                   <Separator />
