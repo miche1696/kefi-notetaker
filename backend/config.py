@@ -35,5 +35,5 @@ TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
 FRONTEND_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Supported file formats
-SUPPORTED_AUDIO_FORMATS = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.webm']
+SUPPORTED_AUDIO_FORMATS = ['.mp3', '.wav', '.m4a', '.ogg', '.opus', '.flac', '.webm']
 SUPPORTED_TEXT_FORMATS = ['.txt','.md']

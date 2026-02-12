@@ -163,7 +163,7 @@ Open your browser to `http://localhost:5173` to use the application.
 
 ### Audio Transcription
 
-**Supported formats:** `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.webm`
+**Supported formats:** `.mp3`, `.wav`, `.m4a`, `.ogg`, `.opus`, `.flac`, `.webm` (including WhatsApp `.opus` audio exports)
 
 1. Drag an audio file onto the editor or folder
 2. Wait for transcription (shown with loading indicator)
@@ -205,11 +205,11 @@ PROJECT_ME/
 
 ## Configuration
 
-### Backend (.env)
+### Backend (root .env)
 
 ```bash
 FLASK_ENV=development
-FLASK_PORT=5000
+FLASK_PORT=5001
 NOTES_DIR=../notes
 UPLOADS_DIR=../uploads
 WHISPER_MODEL=base            # Options: tiny, base, small, medium, large
@@ -226,7 +226,7 @@ MAX_AUDIO_SIZE_MB=100
 ### Frontend (.env)
 
 ```bash
-VITE_API_URL=http://localhost:5000
+VITE_API_URL=http://localhost:5001
 ```
 
 ## API Endpoints
@@ -251,6 +251,7 @@ VITE_API_URL=http://localhost:5000
 
 - `POST /api/transcription/audio` - Upload and transcribe audio
 - `GET /api/transcription/formats` - Get supported formats
+- Supported upload extensions include `.opus` (WhatsApp audio exports)
 
 ## Troubleshooting
 
@@ -274,9 +275,9 @@ ffmpeg -version
 
 ### Port Already in Use
 
-If port 5000 or 5173 is already in use, update the configuration:
+If port 5001 or 5173 is already in use, update the configuration:
 
-**Backend:** Change `FLASK_PORT` in `backend/.env`
+**Backend:** Change `FLASK_PORT` in root `.env`
 
 **Frontend:** Change `port` in `frontend/vite.config.js`
 

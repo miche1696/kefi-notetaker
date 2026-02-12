@@ -4,11 +4,12 @@
 
 echo "Stopping all servers..."
 
-# Load the actual port from .env
-if [ -f "backend/.env" ]; then
-    export $(grep -v '^#' backend/.env | xargs 2>/dev/null)
+# Load backend port from root .env (single source of truth)
+BACKEND_PORT="${FLASK_PORT:-}"
+if [ -z "$BACKEND_PORT" ] && [ -f ".env" ]; then
+    BACKEND_PORT=$(grep -E '^[[:space:]]*FLASK_PORT=' .env | tail -n 1 | cut -d '=' -f2- | tr -d '[:space:]')
 fi
-BACKEND_PORT=${FLASK_PORT:-5000}
+BACKEND_PORT=${BACKEND_PORT:-5001}
 
 # Kill backend by actual configured port
 BACKEND_PIDS=$(lsof -ti :$BACKEND_PORT 2>/dev/null)

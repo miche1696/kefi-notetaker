@@ -65,15 +65,6 @@ const NoteEditor = () => {
     return textareaRef;
   }, [isMarkdown, editorMode]);
 
-  // Text operations hook - use a wrapper ref that points to the active textarea
-  const activeTextareaRef = useRef(null);
-
-  // Keep the active ref updated
-  useEffect(() => {
-    const ref = getActiveTextareaRef();
-    activeTextareaRef.current = ref?.current || null;
-  }, [getActiveTextareaRef, editorMode]);
-
   const replaceSelectionInRender = useCallback(
     async (replacement) => {
       if (!isMarkdown || editorMode !== 'render' || !markdownEditorRef.current) {
@@ -583,7 +574,7 @@ const NoteEditor = () => {
           }
         }
         // Handle audio files
-        else if (file.type.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|flac|webm)$/i.test(file.name)) {
+        else if (file.type.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|opus|flac|webm)$/i.test(file.name)) {
           // Insert placeholder
           const placeholder = `[🎙️ Transcribing...]`;
 
@@ -657,30 +648,6 @@ const NoteEditor = () => {
         setError(`Failed to process file ${file.name}: ${error.message}`);
       }
     }
-  };
-
-  // Get cursor position from drop event
-  const getCursorPositionFromEvent = (e, textarea) => {
-    const rect = textarea.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    // Rough estimation: convert pixel position to character position
-    // This is approximate and works best with monospace fonts
-    const lineHeight = 20; // approximate line height
-    const charWidth = 8; // approximate character width
-
-    const line = Math.floor(y / lineHeight);
-    const col = Math.floor(x / charWidth);
-
-    const lines = content.split('\n');
-    let pos = 0;
-    for (let i = 0; i < line && i < lines.length; i++) {
-      pos += lines[i].length + 1; // +1 for newline
-    }
-    pos += Math.min(col, lines[line]?.length || 0);
-
-    return Math.min(pos, content.length);
   };
 
   const handleDragOver = (e) => {

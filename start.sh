@@ -13,6 +13,13 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Load backend port from root .env (single source of truth)
+BACKEND_PORT="${FLASK_PORT:-}"
+if [ -z "$BACKEND_PORT" ] && [ -f ".env" ]; then
+    BACKEND_PORT=$(grep -E '^[[:space:]]*FLASK_PORT=' .env | tail -n 1 | cut -d '=' -f2- | tr -d '[:space:]')
+fi
+BACKEND_PORT=${BACKEND_PORT:-5001}
+
 # Store PIDs of background processes
 BACKEND_PID=""
 FRONTEND_PID=""
@@ -22,9 +29,9 @@ cleanup() {
     echo -e "\n${YELLOW}Shutting down servers...${NC}"
 
     # Kill backend by port (catches main process + reloader)
-    BACKEND_PIDS=$(lsof -ti :5001 2>/dev/null)
+    BACKEND_PIDS=$(lsof -ti :"$BACKEND_PORT" 2>/dev/null)
     if [ -n "$BACKEND_PIDS" ]; then
-        echo -e "${BLUE}Stopping backend (port 5001)${NC}"
+        echo -e "${BLUE}Stopping backend (port $BACKEND_PORT)${NC}"
         echo "$BACKEND_PIDS" | xargs kill -9 2>/dev/null || true
     fi
 
@@ -123,7 +130,7 @@ if ! kill -0 $BACKEND_PID 2>/dev/null; then
 fi
 
 echo -e "${GREEN}✓ Backend started (PID: $BACKEND_PID)${NC}"
-echo -e "  ${BLUE}→ http://localhost:5001${NC}"
+echo -e "  ${BLUE}→ http://localhost:$BACKEND_PORT${NC}"
 
 # Start Frontend
 echo -e "${BLUE}Starting frontend server...${NC}"
@@ -158,7 +165,7 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}✓ Both servers are running!${NC}"
 echo ""
 echo -e "  ${BLUE}Frontend:${NC} http://localhost:5173"
-echo -e "  ${BLUE}Backend:${NC}  http://localhost:5001"
+echo -e "  ${BLUE}Backend:${NC}  http://localhost:$BACKEND_PORT"
 echo ""
 echo -e "${YELLOW}Press Ctrl+C to stop both servers${NC}"
 echo -e "${GREEN}════════════════════════════════════════${NC}"

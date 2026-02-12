@@ -64,7 +64,7 @@ If you started with `./start.sh`, logs are saved to:
 
 If port 5001 is in use (e.g., by AirPlay on macOS):
 
-1. Edit `backend/.env` and change `FLASK_PORT=5001` to another port
+1. Edit the root `.env` and set `FLASK_PORT=5001` (or another port)
 2. Edit `frontend/.env` and update `VITE_API_URL` to match
 3. Edit `frontend/vite.config.js` proxy target to match
 

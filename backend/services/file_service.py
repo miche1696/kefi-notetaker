@@ -3,7 +3,6 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 from models.note import Note
-from models.folder import Folder
 
 # TODO : GENERAL TODO : Research what happens if the process stops mid-execution + race conditions (in case of collaborative editing)
 

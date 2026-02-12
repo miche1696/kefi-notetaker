@@ -12,7 +12,6 @@ export const useApp = () => {
 
 export const AppProvider = ({ children }) => {
   const [currentFolder, setCurrentFolder] = useState('');  // Current selected folder path
-  const [selectedNoteId, setSelectedNoteId] = useState(null);  // Currently open note
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -21,8 +20,6 @@ export const AppProvider = ({ children }) => {
   const value = {
     currentFolder,
     setCurrentFolder,
-    selectedNoteId,
-    setSelectedNoteId,
     isLoading,
     setIsLoading,
     error,

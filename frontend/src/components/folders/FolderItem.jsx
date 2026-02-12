@@ -252,7 +252,7 @@ const FolderItem = ({ folder, level = 0, onClearRootDragOver }) => {
           await createNote(fileName, folder.path, content);
         }
         // Check if it's an audio file
-        else if (file.type.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|flac|webm)$/i.test(file.name)) {
+        else if (file.type.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|opus|flac|webm)$/i.test(file.name)) {
           // Transcribe audio
           const result = await transcriptionApi.transcribeAudio(file);
           await createNote(fileName, folder.path, result.text);

@@ -5,7 +5,7 @@ import './NoteItem.css';
 
 const NoteItem = ({ note, level = 0, onClearRootDragOver }) => {
   const { getNote, currentNote, deleteNote } = useNotes();
-  const { setSelectedNoteId, setError } = useApp();
+  const { setError } = useApp();
   const [isConfirming, setIsConfirming] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -18,7 +18,6 @@ const NoteItem = ({ note, level = 0, onClearRootDragOver }) => {
     }
     try {
       await getNote(note.path);
-      setSelectedNoteId(note.path);
     } catch (error) {
       console.error('Error loading note:', error);
     }
