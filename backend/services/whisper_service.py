@@ -1,4 +1,6 @@
 import whisper
+import threading
+import time
 from pathlib import Path
 from typing import List, Optional
 import config
@@ -21,6 +23,9 @@ class WhisperService:
         print(f"Loading Whisper model: {resolved_model}...")
         self.model = whisper.load_model(resolved_model)
         self.model_name = resolved_model
+        # Whisper model inference is not thread-safe with a shared model instance.
+        # Serializing access prevents tensor-shape races under concurrent jobs.
+        self._transcribe_lock = threading.Lock()
         print(f"Whisper model '{resolved_model}' loaded successfully")
 
         if self.trace_logger:
@@ -88,12 +93,24 @@ class WhisperService:
                     },
                 )
 
-            # Transcribe audio
-            result = self.model.transcribe(
-                str(audio_file),
-                fp16=False,  # Disable FP16 for CPU compatibility
-                verbose=False
-            )
+            wait_started = time.perf_counter()
+            with self._transcribe_lock:
+                waited_ms = int((time.perf_counter() - wait_started) * 1000)
+                if waited_ms > 0 and self.trace_logger:
+                    self.trace_logger.write(
+                        "whisper.transcribe.lock_wait",
+                        data={
+                            "file": audio_file.name,
+                            "waited_ms": waited_ms,
+                        },
+                    )
+
+                # Transcribe audio
+                result = self.model.transcribe(
+                    str(audio_file),
+                    fp16=False,  # Disable FP16 for CPU compatibility
+                    verbose=False
+                )
 
             transcribed_text = result['text'].strip()
             detected_language = result.get('language', 'unknown')

@@ -22,7 +22,7 @@ def request_json(method, url, payload=None, timeout=10):
     return json.loads(body)
 
 
-def load_trace(path: Path):
+def load_trace(path: Path, min_ts=None):
     if not path.exists():
         return []
     entries = []
@@ -32,7 +32,14 @@ def load_trace(path: Path):
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
+                entry = json.loads(line)
+                if min_ts is not None:
+                    try:
+                        if float(entry.get("ts", 0)) < float(min_ts):
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                entries.append(entry)
             except json.JSONDecodeError:
                 continue
     return entries
@@ -56,9 +63,26 @@ def main() -> int:
     args = parser.parse_args()
 
     base = args.base.rstrip("/")
+    start_ts = time.time()
     health = request_json("GET", f"{base}/api/health")
     if health.get("status") != "healthy":
         print("Health check failed", file=sys.stderr)
+        return 1
+
+    # Basic settings + transcription API checks
+    settings = request_json("GET", f"{base}/api/settings")
+    if "transcription" not in settings:
+        print("Settings API failed", file=sys.stderr)
+        return 1
+
+    formats = request_json("GET", f"{base}/api/transcription/formats")
+    if ".opus" not in (formats.get("formats") or []):
+        print("Transcription formats missing .opus", file=sys.stderr)
+        return 1
+
+    jobs = request_json("GET", f"{base}/api/transcription/jobs")
+    if not isinstance(jobs.get("jobs"), list):
+        print("Transcription jobs list failed", file=sys.stderr)
         return 1
 
     # Create a note
@@ -76,8 +100,12 @@ def main() -> int:
         },
     )
     note_path = created.get("path")
+    note_id = created.get("id")
     if not note_path:
         print("Create note failed", file=sys.stderr)
+        return 1
+    if not note_id:
+        print("Create note did not return id", file=sys.stderr)
         return 1
 
     # Fetch note
@@ -87,11 +115,68 @@ def main() -> int:
         print("Fetch note failed", file=sys.stderr)
         return 1
 
+    # Fetch by stable id
+    fetched_by_id = request_json("GET", f"{base}/api/notes/id/{urllib.parse.quote(note_id, safe='')}")
+    if fetched_by_id.get("id") != note_id:
+        print("Get note by id failed", file=sys.stderr)
+        return 1
+
     # Update note
-    request_json("PUT", f"{base}/api/notes/{encoded}", {"content": "Updated smoke content"})
+    marker = "[[tx:smoke-marker:Transcription ongoing...]]"
+    updated = request_json(
+        "PUT",
+        f"{base}/api/notes/{encoded}",
+        {
+            "content": f"Updated smoke content {marker}",
+            "expected_revision": fetched.get("revision"),
+        },
+    )
+
+    # Replace marker by id
+    replaced = request_json(
+        "PATCH",
+        f"{base}/api/notes/id/{urllib.parse.quote(note_id, safe='')}/replace-marker",
+        {
+            "marker_token": marker,
+            "replacement_text": "transcribed smoke",
+        },
+    )
+    if replaced.get("status") != "applied":
+        print("Replace marker failed", file=sys.stderr)
+        return 1
+
     fetched = request_json("GET", f"{base}/api/notes/{encoded}")
-    if fetched.get("content") != "Updated smoke content":
+    content = fetched.get("content", "")
+    if marker in content or "transcribed smoke" not in content:
         print("Update note failed", file=sys.stderr)
+        return 1
+
+    # Replace marker should also support markdown-escaped variants.
+    escaped_marker = r"\[\[tx:smoke-marker-escaped:Transcription ongoing...]]"
+    marker_unescaped = "[[tx:smoke-marker-escaped:Transcription ongoing...]]"
+    updated = request_json(
+        "PUT",
+        f"{base}/api/notes/{encoded}",
+        {
+            "content": f"{content}\n\n{escaped_marker}",
+            "expected_revision": fetched.get("revision"),
+        },
+    )
+    replaced_escaped = request_json(
+        "PATCH",
+        f"{base}/api/notes/id/{urllib.parse.quote(note_id, safe='')}/replace-marker",
+        {
+            "marker_token": marker_unescaped,
+            "replacement_text": "transcribed escaped smoke",
+        },
+    )
+    if replaced_escaped.get("status") != "applied":
+        print("Replace escaped marker failed", file=sys.stderr)
+        return 1
+    fetched = request_json("GET", f"{base}/api/notes/{encoded}")
+    content = fetched.get("content", "")
+    if escaped_marker in content or "transcribed escaped smoke" not in content:
+        print("Escaped marker replacement failed", file=sys.stderr)
         return 1
 
     # Text processing
@@ -167,8 +252,8 @@ def main() -> int:
 
     # Trace verification
     repo_root = Path(__file__).resolve().parents[1]
-    backend_trace = load_trace(repo_root / args.trace_backend)
-    frontend_trace = load_trace(repo_root / args.trace_frontend)
+    backend_trace = load_trace(repo_root / args.trace_backend, min_ts=start_ts)
+    frontend_trace = load_trace(repo_root / args.trace_frontend, min_ts=start_ts)
 
     required_backend_events = [
         ("api.response", None),
@@ -180,6 +265,8 @@ def main() -> int:
         ("folder.rename", renamed_folder),
         ("folder.delete", renamed_folder),
         ("text.process", "clean-transcription"),
+        ("note.marker.replaced", "smoke-marker"),
+        ("note.marker.replaced", "smoke-marker-escaped"),
     ]
 
     for event, needle in required_backend_events:

@@ -46,9 +46,23 @@ export const notesApi = {
    * @param {string} content - New content
    * @returns {Promise} Promise with updated note data
    */
-  updateNote: async (notePath, content) => {
+  updateNote: async (notePath, content, expectedRevision) => {
     const response = await apiClient.put(`/notes/${notePath}`, {
       content,
+      expected_revision: expectedRevision,
+    });
+    return response.data;
+  },
+
+  getNoteById: async (noteId) => {
+    const response = await apiClient.get(`/notes/id/${noteId}`);
+    return response.data;
+  },
+
+  replaceMarker: async (noteId, markerToken, replacementText) => {
+    const response = await apiClient.patch(`/notes/id/${noteId}/replace-marker`, {
+      marker_token: markerToken,
+      replacement_text: replacementText,
     });
     return response.data;
   },

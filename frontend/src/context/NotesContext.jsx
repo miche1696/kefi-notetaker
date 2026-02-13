@@ -78,14 +78,17 @@ export const NotesProvider = ({ children }) => {
   // 1. The local component state already has the latest content
   // 2. Updating currentNote triggers re-renders that reset MDXEditor cursor position
   // 3. We also skip refreshNotes() since content changes don't affect the notes list
-  const updateNote = useCallback(async (notePath, content) => {
+  const updateNote = useCallback(async (notePath, content, expectedRevision) => {
     try {
-      const note = await notesApi.updateNote(notePath, content);
+      const revisionToUse = expectedRevision ?? currentNote?.revision ?? 1;
+      const note = await notesApi.updateNote(notePath, content, revisionToUse);
       // Only update the content in currentNote without replacing the entire object
       // This avoids triggering re-renders that would reset editor state
-      if (currentNote && currentNote.path === notePath) {
+      if (currentNote && currentNote.path === note.path) {
         // Update only the content field, preserving reference stability
         currentNote.content = content;
+        currentNote.revision = note.revision;
+        currentNote.id = note.id;
       }
       // Skip refreshNotes() - content changes don't affect the folder tree or note list
       return note;
@@ -157,6 +160,17 @@ export const NotesProvider = ({ children }) => {
       return note;
     } catch (error) {
       console.error('Error fetching note:', error);
+      throw error;
+    }
+  }, []);
+
+  const getNoteById = useCallback(async (noteId) => {
+    try {
+      const note = await notesApi.getNoteById(noteId);
+      setCurrentNote(note);
+      return note;
+    } catch (error) {
+      console.error('Error fetching note by id:', error);
       throw error;
     }
   }, []);
@@ -267,6 +281,7 @@ export const NotesProvider = ({ children }) => {
     renameNote,
     moveNote,
     getNote,
+    getNoteById,
     createFolder,
     renameFolder,
     deleteFolder,

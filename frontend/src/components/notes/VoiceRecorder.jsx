@@ -1,73 +1,54 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { transcriptionApi } from '../../api/transcription';
+import React, { useEffect, useRef, useState } from 'react';
 import './VoiceRecorder.css';
 
-// Recording states
 const RecordingState = {
   IDLE: 'idle',
   RECORDING: 'recording',
-  TRANSCRIBING: 'transcribing'
 };
 
 const VoiceRecorder = ({
-  onTranscriptionComplete,
-  onTranscriptionStart,
-  onTranscriptionEnd,
   onRecordingStart,
+  onRecordingReady,
   onError,
-  disabled
+  disabled,
 }) => {
-  // State
   const [recordingState, setRecordingState] = useState(RecordingState.IDLE);
   const [recordingTime, setRecordingTime] = useState(0);
   const [audioLevels, setAudioLevels] = useState([0, 0, 0, 0, 0]);
   const [error, setError] = useState(null);
   const [isSupported, setIsSupported] = useState(true);
 
-  // Refs
   const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
   const timerIntervalRef = useRef(null);
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const mediaStreamRef = useRef(null);
-  const placeholderRef = useRef(null);
+  const launchContextRef = useRef(null);
+  const mimeTypeRef = useRef('audio/webm;codecs=opus');
 
-  // Check browser compatibility on mount
   useEffect(() => {
-    const checkSupport = () => {
-      const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-      const hasMediaRecorder = !!window.MediaRecorder;
-      setIsSupported(hasGetUserMedia && hasMediaRecorder);
-    };
-    checkSupport();
+    const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    const hasMediaRecorder = !!window.MediaRecorder;
+    setIsSupported(hasGetUserMedia && hasMediaRecorder);
   }, []);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      cleanup();
-    };
-  }, []);
+  useEffect(() => () => cleanup(), []);
 
-  // Format time as MM:SS
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Start timer
   const startTimer = () => {
     const startTime = Date.now();
     timerIntervalRef.current = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      setRecordingTime(elapsed);
+      setRecordingTime(Math.floor((Date.now() - startTime) / 1000));
     }, 1000);
   };
 
-  // Stop timer
   const stopTimer = () => {
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
@@ -75,7 +56,6 @@ const VoiceRecorder = ({
     }
   };
 
-  // Audio visualization
   const startAudioVisualization = (stream) => {
     try {
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -90,22 +70,19 @@ const VoiceRecorder = ({
       analyserRef.current = analyser;
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
       const updateAudioLevel = () => {
         analyser.getByteFrequencyData(dataArray);
 
-        // Calculate levels for 5 bars
         const barCount = 5;
         const barWidth = Math.floor(dataArray.length / barCount);
         const levels = [];
 
-        for (let i = 0; i < barCount; i++) {
+        for (let i = 0; i < barCount; i += 1) {
           const start = i * barWidth;
           const end = start + barWidth;
           const slice = dataArray.slice(start, end);
           const average = slice.reduce((a, b) => a + b, 0) / slice.length;
-          const normalized = Math.min(average / 128, 1); // 0 to 1
-          levels.push(normalized);
+          levels.push(Math.min(average / 128, 1));
         }
 
         setAudioLevels(levels);
@@ -114,11 +91,10 @@ const VoiceRecorder = ({
 
       updateAudioLevel();
     } catch (err) {
-      console.error('Error setting up audio visualization:', err);
+      // Visualization is optional and should never block recording.
     }
   };
 
-  // Stop audio visualization
   const stopAudioVisualization = () => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -132,217 +108,125 @@ const VoiceRecorder = ({
     setAudioLevels([0, 0, 0, 0, 0]);
   };
 
-  // Cleanup resources
   const cleanup = () => {
-    // Stop media recorder
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
-
-    // Stop all media tracks
     if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
     }
-
-    // Stop timer
     stopTimer();
-
-    // Stop audio visualization
     stopAudioVisualization();
-
-    // Clear audio chunks
-    audioChunksRef.current = [];
-
-    // Reset media recorder
     mediaRecorderRef.current = null;
+    audioChunksRef.current = [];
   };
 
-  // Start recording
+  const resolveMimeType = () => {
+    let mimeType = 'audio/webm;codecs=opus';
+    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/webm';
+    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/ogg;codecs=opus';
+    return mimeType;
+  };
+
   const startRecording = async () => {
     try {
       setError(null);
+      const launchContext = onRecordingStart ? await onRecordingStart() : null;
+      launchContextRef.current = launchContext;
 
-      // Request microphone permission
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
-        }
+          autoGainControl: true,
+        },
       });
-
       mediaStreamRef.current = stream;
 
-      // Determine supported MIME type
-      let mimeType = 'audio/webm;codecs=opus';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'audio/webm';
-      }
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'audio/ogg;codecs=opus';
-      }
-
-      // Create media recorder
+      const mimeType = resolveMimeType();
+      mimeTypeRef.current = mimeType;
       const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
-      // Handle data available
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
 
-      // Handle recording stop
-      mediaRecorder.onstop = async () => {
-        const blob = new Blob(audioChunksRef.current, { type: mimeType });
-        await handleTranscription(blob, mimeType);
+      mediaRecorder.onstop = () => {
+        const usedMimeType = mimeTypeRef.current || mimeType;
+        const extension = usedMimeType.includes('ogg') ? 'ogg' : 'webm';
+        const blob = new Blob(audioChunksRef.current, { type: usedMimeType });
+        const audioFile = new File([blob], `recording.${extension}`, { type: usedMimeType });
+        const launchPayload = launchContextRef.current;
+
+        // Return to idle immediately; transcription runs in background queue.
+        setRecordingState(RecordingState.IDLE);
+        setRecordingTime(0);
+        launchContextRef.current = null;
+
+        if (onRecordingReady) {
+          Promise.resolve(onRecordingReady(audioFile, launchPayload)).catch((err) => {
+            const message = err?.message || 'Failed to queue recording transcription.';
+            setError(message);
+            if (onError) onError(message);
+          });
+        }
       };
 
-      // Handle errors
       mediaRecorder.onerror = (event) => {
-        console.error('MediaRecorder error:', event.error);
-        const errorMessage = 'Recording failed. Please try again.';
-        setError(errorMessage);
-        if (onError) onError(errorMessage);
-
-        // Replace placeholder with error message
-        if (placeholderRef.current && onTranscriptionComplete) {
-          onTranscriptionComplete('[Recording failed]', placeholderRef.current);
-        }
-
-        placeholderRef.current = null;
+        const message = event?.error?.message || 'Recording failed. Please try again.';
+        setError(message);
+        if (onError) onError(message);
+        launchContextRef.current = null;
         cleanup();
         setRecordingState(RecordingState.IDLE);
       };
 
-      // Start recording
       mediaRecorder.start();
       setRecordingState(RecordingState.RECORDING);
-
-      // Insert placeholder at cursor position
-      const placeholder = '[Listening..]';
-      placeholderRef.current = placeholder;
-      if (onRecordingStart) {
-        onRecordingStart(placeholder);
-      }
-
-      // Start timer
       startTimer();
-
-      // Start audio visualization
       startAudioVisualization(stream);
-
     } catch (err) {
-      console.error('Error starting recording:', err);
-      let errorMessage = 'Failed to start recording.';
-
+      let message = 'Failed to start recording.';
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        errorMessage = 'Microphone access denied. Please enable in browser settings.';
+        message = 'Microphone access denied. Please enable in browser settings.';
       } else if (err.name === 'NotFoundError') {
-        errorMessage = 'No microphone found. Please connect a microphone.';
+        message = 'No microphone found. Please connect a microphone.';
       }
-
-      setError(errorMessage);
-      if (onError) onError(errorMessage);
-
-      // If placeholder was inserted, remove it
-      if (placeholderRef.current && onTranscriptionComplete) {
-        onTranscriptionComplete('', placeholderRef.current);
-      }
-
-      placeholderRef.current = null;
+      setError(message);
+      if (onError) onError(message);
+      launchContextRef.current = null;
       cleanup();
+      setRecordingState(RecordingState.IDLE);
     }
   };
 
-  // Stop recording
   const stopRecording = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
       stopTimer();
       stopAudioVisualization();
-
-      // Stop media stream
       if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach(track => track.stop());
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     }
   };
 
-  // Handle transcription
-  const handleTranscription = async (blob, mimeType) => {
-    setRecordingState(RecordingState.TRANSCRIBING);
-
-    if (onTranscriptionStart) {
-      onTranscriptionStart();
-    }
-
-    try {
-      // Convert blob to file with appropriate extension
-      const extension = mimeType.includes('webm') ? 'webm' : 'ogg';
-      const audioFile = new File([blob], `recording.${extension}`, { type: mimeType });
-
-      // Transcribe audio
-      const result = await transcriptionApi.transcribeAudio(audioFile);
-
-      // Replace placeholder with transcribed text
-      if (onTranscriptionComplete && result.text) {
-        onTranscriptionComplete(result.text, placeholderRef.current);
-      }
-
-      // Reset state
-      setRecordingState(RecordingState.IDLE);
-      setRecordingTime(0);
-      setError(null);
-      placeholderRef.current = null;
-
-    } catch (err) {
-      console.error('Transcription error:', err);
-      const errorMessage = `Transcription failed: ${err.message}`;
-      setError(errorMessage);
-
-      // Replace placeholder with error message
-      if (onTranscriptionComplete && placeholderRef.current) {
-        onTranscriptionComplete('[Error transcribing audio]', placeholderRef.current);
-      }
-
-      if (onError) onError(errorMessage);
-      setRecordingState(RecordingState.IDLE);
-      setRecordingTime(0);
-      placeholderRef.current = null;
-    } finally {
-      if (onTranscriptionEnd) {
-        onTranscriptionEnd();
-      }
-      cleanup();
-    }
-  };
-
-  // Handle button click
   const handleClick = () => {
     if (disabled) return;
-
     if (recordingState === RecordingState.IDLE) {
       startRecording();
-    } else if (recordingState === RecordingState.RECORDING) {
+    } else {
       stopRecording();
     }
   };
 
-  // Dismiss error
-  const handleDismissError = () => {
-    setError(null);
-  };
+  if (!isSupported) return null;
 
-  // Don't render if not supported
-  if (!isSupported) {
-    return null;
-  }
-
-  // Render idle state - floating button
   if (recordingState === RecordingState.IDLE) {
     return (
       <button
@@ -362,48 +246,29 @@ const VoiceRecorder = ({
     );
   }
 
-  // Render recording or transcribing state - expanded panel
   return (
     <div className="voice-recorder-panel">
       {error && (
         <div className="recording-error">
           <span className="error-icon">⚠️</span>
           <span className="error-message">{error}</span>
-          <button onClick={handleDismissError} className="error-dismiss">×</button>
+          <button onClick={() => setError(null)} className="error-dismiss">×</button>
         </div>
       )}
 
       <div className="recording-timer">{formatTime(recordingTime)}</div>
 
-      {recordingState === RecordingState.RECORDING && (
-        <>
-          <div className="audio-bars">
-            {audioLevels.map((level, index) => (
-              <div
-                key={index}
-                className="audio-bar"
-                style={{
-                  height: `${Math.max(8, level * 32)}px`
-                }}
-              />
-            ))}
-          </div>
-
-          <button
-            className="stop-button"
-            onClick={stopRecording}
-            aria-label="Stop recording"
-            title="Stop recording"
+      <div className="audio-bars">
+        {audioLevels.map((level, index) => (
+          <div
+            key={index}
+            className="audio-bar"
+            style={{ height: `${Math.max(8, level * 32)}px` }}
           />
-        </>
-      )}
+        ))}
+      </div>
 
-      {recordingState === RecordingState.TRANSCRIBING && (
-        <div className="transcribing-indicator">
-          <div className="spinner" />
-          <span className="transcribing-text">Transcribing...</span>
-        </div>
-      )}
+      <button className="stop-button" onClick={stopRecording} aria-label="Stop recording" />
     </div>
   );
 };

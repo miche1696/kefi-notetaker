@@ -1,18 +1,31 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNotes } from '../../context/NotesContext';
 import { useApp } from '../../context/AppContext';
 import { useSelection } from '../../context/SelectionContext';
-import { transcriptionApi } from '../../api/transcription';
+import { useTranscriptionJobs } from '../../context/TranscriptionJobsContext';
 import { useTextOperations } from '../../hooks/useTextOperations';
 import NoteToolbar from './NoteToolbar';
 import VoiceRecorder from './VoiceRecorder';
 import MarkdownEditor from './MarkdownEditor';
+import TranscriptionJobsPanel from './TranscriptionJobsPanel';
 import { SelectionToolbar } from '../selection';
+import { replaceMarkerInText } from '../../utils/transcriptionMarkers';
+import { applyCompletedJobToEditor } from '../../utils/transcriptionApplyFlow';
+import { traceEvent } from '../../api/trace';
 import './NoteEditor.css';
 
+const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed', 'orphaned', 'cancelled']);
+
 const NoteEditor = () => {
-  const { currentNote, updateNote } = useNotes();
+  const { currentNote, updateNote, getNoteById } = useNotes();
   const { setError } = useApp();
+  const {
+    enqueueAudioJob,
+    jobs,
+    resolveMarkersInContent,
+    subscribeToJobEvents,
+    registerInsertAtCursorHandler,
+  } = useTranscriptionJobs();
   const {
     selectedText,
     selectionStart,
@@ -29,9 +42,8 @@ const NoteEditor = () => {
 
   const [content, setContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
   const [cursorPosition, setCursorPosition] = useState(0);
-  const [editorMode, setEditorMode] = useState('render'); // 'render' (WYSIWYG) or 'source' (raw markdown)
+  const [editorMode, setEditorMode] = useState('render');
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const textareaRef = useRef(null);
   const markdownEditorRef = useRef(null);
@@ -40,21 +52,81 @@ const NoteEditor = () => {
   const lastMousePositionRef = useRef({ x: 0, y: 0 });
   const isInitializingRef = useRef(false);
   const currentNotePathRef = useRef(null);
+  const currentRevisionRef = useRef(1);
 
-  // Check if current note is markdown
   const isMarkdown = currentNote?.file_type === 'md';
 
-  // Trigger save callback for useTextOperations
-  const triggerSave = useCallback(
-    (newContent) => {
-      if (currentNote) {
-        saveNote(newContent);
-      }
-    },
-    [currentNote]
+  const isTranscribing = useMemo(
+    () =>
+      jobs.some(
+        (job) =>
+          job.note_id === currentNote?.id &&
+          !TERMINAL_JOB_STATUSES.has(job.status)
+      ),
+    [jobs, currentNote?.id]
   );
 
-  // Get the active textarea ref (either plain text or markdown source mode)
+  const saveNote = useCallback(
+    async (contentToSave, options = {}) => {
+      if (!currentNote) return null;
+
+      const { suppressError = false } = options;
+      try {
+        setIsSaving(true);
+        const expectedRevision = currentRevisionRef.current || currentNote.revision || 1;
+        const saved = await updateNote(currentNote.path, contentToSave, expectedRevision);
+        currentRevisionRef.current = saved?.revision || expectedRevision;
+        return saved;
+      } catch (error) {
+        const status = error?.response?.status;
+        if (status === 409 && currentNote?.id) {
+          try {
+            const latest = await getNoteById(currentNote.id);
+            currentRevisionRef.current = latest?.revision || currentRevisionRef.current;
+            const mergedContent = resolveMarkersInContent(currentNote.id, contentToSave);
+            const hasUnresolvedMarker = /\[\[tx:[^\]]+\]\]/.test(mergedContent);
+
+            if (mergedContent !== latest.content && !hasUnresolvedMarker) {
+              const retried = await updateNote(latest.path, mergedContent, latest.revision);
+              currentRevisionRef.current = retried?.revision || currentRevisionRef.current;
+              if (currentNotePathRef.current === latest.path) {
+                setContent(mergedContent);
+              }
+              return retried;
+            }
+            if (currentNotePathRef.current === latest.path) {
+              setContent(latest.content || '');
+            }
+            return latest;
+          } catch (retryError) {
+            if (!suppressError) {
+              setError('Failed to save note: ' + retryError.message);
+            }
+            throw retryError;
+          }
+        }
+
+        if (!suppressError) {
+          setError('Failed to save note: ' + error.message);
+        }
+        throw error;
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [currentNote, getNoteById, resolveMarkersInContent, setError, updateNote]
+  );
+
+  const triggerSave = useCallback(
+    (newContent) => {
+      if (!currentNote) return;
+      saveNote(newContent).catch(() => {
+        // saveNote already handled error reporting.
+      });
+    },
+    [currentNote, saveNote]
+  );
+
   const getActiveTextareaRef = useCallback(() => {
     if (isMarkdown) {
       if (editorMode === 'source' && markdownEditorRef.current) {
@@ -63,7 +135,7 @@ const NoteEditor = () => {
       return null;
     }
     return textareaRef;
-  }, [isMarkdown, editorMode]);
+  }, [editorMode, isMarkdown]);
 
   const replaceSelectionInRender = useCallback(
     async (replacement) => {
@@ -84,22 +156,16 @@ const NoteEditor = () => {
     isMarkdown && editorMode === 'render' ? replaceSelectionInRender : null
   );
 
-  // Load note content when current note changes
   useEffect(() => {
-    // CRITICAL: Cancel any pending save from the previous note
-    // This prevents the race condition where old content gets saved to the new note
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
 
-    // Mark that we're initializing a new note - skip onChange calls during this time
-    // This prevents MDXEditor initialization from triggering saves
     const noteChanged = currentNote?.path !== currentNotePathRef.current;
     if (noteChanged) {
       isInitializingRef.current = true;
       currentNotePathRef.current = currentNote?.path || null;
-      // Allow initialization to complete before accepting onChange calls
       setTimeout(() => {
         isInitializingRef.current = false;
       }, 100);
@@ -107,14 +173,14 @@ const NoteEditor = () => {
 
     if (currentNote) {
       setContent(currentNote.content || '');
+      currentRevisionRef.current = currentNote.revision || 1;
     } else {
       setContent('');
+      currentRevisionRef.current = 1;
     }
-    // Clear selection when note changes
     clearSelection();
   }, [currentNote, clearSelection]);
 
-  // Cleanup: cancel any pending save on unmount
   useEffect(() => {
     return () => {
       if (saveTimeoutRef.current) {
@@ -123,264 +189,228 @@ const NoteEditor = () => {
     };
   }, []);
 
-  // Clear selection when editor mode changes
   useEffect(() => {
     clearSelection();
   }, [editorMode, clearSelection]);
 
-
-  // Auto-save functionality (debounced)
   const handleContentChange = (e) => {
     const newContent = e.target.value;
     setContent(newContent);
-
-    // Store cursor position
     setCursorPosition(e.target.selectionStart);
 
-    // Clear selection when content changes (typing)
     if (hasSelection) {
       clearSelection();
     }
 
-    // Clear existing timeout
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
     }
 
-    // Capture the note path at the time of the change to prevent race conditions
     const notePathAtChange = currentNote?.path;
 
-    // Set new timeout for auto-save
     saveTimeoutRef.current = setTimeout(() => {
-      // Verify the note hasn't changed before saving
       if (currentNote && currentNote.path === notePathAtChange) {
-        saveNote(newContent);
+        saveNote(newContent, { suppressError: true }).catch(() => {
+          // saveNote already handled error reporting.
+        });
       }
-    }, 500); // 500ms debounce
+    }, 500);
   };
 
-  // Handle markdown editor changes
-  const handleMarkdownChange = useCallback((newContent) => {
-    // Skip onChange calls during note initialization (e.g., MDXEditor mounting)
-    // This prevents accidental saves of stale or intermediate content
-    if (isInitializingRef.current) {
-      return;
-    }
-
-    setContent(newContent);
-
-    // Clear existing timeout
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-    }
-
-    // Capture the note path at the time of the change to prevent race conditions
-    const notePathAtChange = currentNote?.path;
-
-    // Set new timeout for auto-save
-    saveTimeoutRef.current = setTimeout(() => {
-      // Double-check we're not in initialization and note hasn't changed
+  const handleMarkdownChange = useCallback(
+    (newContent) => {
       if (isInitializingRef.current) {
         return;
       }
-      // Use ref for reliable comparison - the closure's currentNote might be stale
-      // Only save if we're still on the same note that triggered the change
-      if (currentNotePathRef.current === notePathAtChange) {
-        saveNote(newContent);
+
+      setContent(newContent);
+
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
       }
-    }, 500); // 500ms debounce
-  }, [currentNote]);
 
-  const saveNote = async (contentToSave) => {
-    if (!currentNote) return;
+      const notePathAtChange = currentNote?.path;
+      saveTimeoutRef.current = setTimeout(() => {
+        if (isInitializingRef.current) {
+          return;
+        }
+        if (currentNotePathRef.current === notePathAtChange) {
+          saveNote(newContent, { suppressError: true }).catch(() => {
+            // saveNote already handled error reporting.
+          });
+        }
+      }, 500);
+    },
+    [currentNote, saveNote]
+  );
 
-    try {
-      setIsSaving(true);
-      await updateNote(currentNote.path, contentToSave);
-    } catch (error) {
-      setError('Failed to save note: ' + error.message);
-    } finally {
-      setIsSaving(false);
-    }
-  };
+  const getCaretCoordinates = useCallback(
+    (textarea, position) => {
+      const mirror = document.createElement('div');
+      const style = window.getComputedStyle(textarea);
 
-  // Get caret coordinates using mirror div technique
-  const getCaretCoordinates = useCallback((textarea, position) => {
-    // Create a mirror div with identical styling
-    const mirror = document.createElement('div');
-    const style = window.getComputedStyle(textarea);
+      const styleProps = [
+        'font',
+        'fontSize',
+        'fontFamily',
+        'fontWeight',
+        'fontStyle',
+        'lineHeight',
+        'paddingTop',
+        'paddingLeft',
+        'paddingRight',
+        'paddingBottom',
+        'borderLeftWidth',
+        'borderTopWidth',
+        'borderRightWidth',
+        'borderBottomWidth',
+        'boxSizing',
+        'width',
+        'wordWrap',
+        'whiteSpace',
+        'letterSpacing',
+        'textIndent',
+        'textTransform',
+        'wordSpacing',
+        'textAlign',
+      ];
 
-    // Copy all relevant styles that affect text layout
-    const styleProps = [
-      'font', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle',
-      'lineHeight', 'paddingTop', 'paddingLeft', 'paddingRight', 'paddingBottom',
-      'borderLeftWidth', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth',
-      'boxSizing', 'width', 'wordWrap', 'whiteSpace', 'letterSpacing',
-      'textIndent', 'textTransform', 'wordSpacing', 'textAlign'
-    ];
+      styleProps.forEach((prop) => {
+        mirror.style[prop] = style[prop];
+      });
 
-    styleProps.forEach(prop => {
-      mirror.style[prop] = style[prop];
-    });
+      mirror.style.position = 'absolute';
+      mirror.style.visibility = 'hidden';
+      mirror.style.whiteSpace = 'pre-wrap';
+      mirror.style.wordWrap = 'break-word';
+      mirror.style.overflow = 'hidden';
+      mirror.style.height = 'auto';
+      mirror.style.top = '0';
+      mirror.style.left = '0';
 
-    // Additional positioning styles
-    mirror.style.position = 'absolute';
-    mirror.style.visibility = 'hidden';
-    mirror.style.whiteSpace = 'pre-wrap';
-    mirror.style.wordWrap = 'break-word';
-    mirror.style.overflow = 'hidden';
-    mirror.style.height = 'auto';
-    mirror.style.top = '0';
-    mirror.style.left = '0';
+      const textareaRect = textarea.getBoundingClientRect();
+      const scrollTop = textarea.scrollTop;
+      const scrollLeft = textarea.scrollLeft;
 
-    // Get textarea dimensions and scroll
-    const textareaRect = textarea.getBoundingClientRect();
-    const scrollTop = textarea.scrollTop;
-    const scrollLeft = textarea.scrollLeft;
+      const paddingLeft = parseFloat(style.paddingLeft) || 0;
+      const paddingRight = parseFloat(style.paddingRight) || 0;
+      mirror.style.width = `${textareaRect.width - paddingLeft - paddingRight}px`;
 
-    // Set mirror width to match textarea content width
-    const paddingLeft = parseFloat(style.paddingLeft) || 0;
-    const paddingRight = parseFloat(style.paddingRight) || 0;
-    mirror.style.width = `${textareaRect.width - paddingLeft - paddingRight}px`;
+      const textBeforeCaret = content.substring(0, position);
+      mirror.textContent = textBeforeCaret;
 
-    // Insert text up to caret position
-    const textBeforeCaret = content.substring(0, position);
-    mirror.textContent = textBeforeCaret;
+      const marker = document.createElement('span');
+      marker.textContent = '|';
+      mirror.appendChild(marker);
 
-    // Create a marker span to measure caret position
-    const marker = document.createElement('span');
-    marker.textContent = '|';
-    mirror.appendChild(marker);
+      document.body.appendChild(mirror);
 
-    // Append to body temporarily
-    document.body.appendChild(mirror);
+      const markerRect = marker.getBoundingClientRect();
+      const mirrorRect = mirror.getBoundingClientRect();
 
-    // Get marker position relative to mirror
-    const markerRect = marker.getBoundingClientRect();
-    const mirrorRect = mirror.getBoundingClientRect();
+      const x = textareaRect.left + paddingLeft + (markerRect.left - mirrorRect.left) - scrollLeft;
+      const y = textareaRect.top + (markerRect.top - mirrorRect.top) - scrollTop;
 
-    // Calculate position relative to textarea
-    const x = textareaRect.left + paddingLeft + (markerRect.left - mirrorRect.left) - scrollLeft;
-    const y = textareaRect.top + (markerRect.top - mirrorRect.top) - scrollTop;
+      document.body.removeChild(mirror);
+      return { x, y };
+    },
+    [content]
+  );
 
-    // Clean up
-    document.body.removeChild(mirror);
+  const handleSelectionChange = useCallback(
+    (position) => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
 
-    return { x, y };
-  }, [content]);
+      const { selectionStart: start, selectionEnd: end, selectionDirection } = textarea;
+      if (start !== end) {
+        const selected = content.substring(start, end);
 
-  // Handle text selection with position (for plain text editor)
-  const handleSelectionChange = useCallback((position) => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
+        let toolbarPos;
+        if (position) {
+          toolbarPos = position;
+        } else {
+          const focusPosition = selectionDirection === 'backward' ? start : end;
+          toolbarPos = getCaretCoordinates(textarea, focusPosition);
+        }
 
-    const { selectionStart, selectionEnd, selectionDirection } = textarea;
-
-    if (selectionStart !== selectionEnd) {
-      const selectedText = content.substring(selectionStart, selectionEnd);
-
-      // Use provided position (from mouse) or calculate from caret (keyboard)
-      let toolbarPos;
-      if (position) {
-        // Mouse selection - use mouse coordinates (already the focus position)
-        toolbarPos = position;
+        updateSelection(start, end, selected, toolbarPos);
       } else {
-        // Keyboard selection - use FOCUS position (the moving cursor)
-        // If backward selection, focus is at selectionStart
-        // If forward selection, focus is at selectionEnd
-        const focusPosition = selectionDirection === 'backward'
-          ? selectionStart
-          : selectionEnd;
-        toolbarPos = getCaretCoordinates(textarea, focusPosition);
+        clearSelection();
       }
+    },
+    [content, updateSelection, clearSelection, getCaretCoordinates]
+  );
 
-      updateSelection(selectionStart, selectionEnd, selectedText, toolbarPos);
-    } else {
-      clearSelection();
-    }
-  }, [content, updateSelection, clearSelection, getCaretCoordinates]);
+  const handleMarkdownSourceSelection = useCallback(
+    (e, textarea) => {
+      if (!textarea) return;
+      const { selectionStart: start, selectionEnd: end, selectionDirection } = textarea;
+      if (start !== end) {
+        const selected = content.substring(start, end);
 
-  // Handle markdown source mode selection
-  const handleMarkdownSourceSelection = useCallback((e, textarea) => {
-    if (!textarea) return;
+        let toolbarPos;
+        if (e.type === 'mouseup') {
+          toolbarPos = { x: e.clientX, y: e.clientY - 15 };
+        } else {
+          const focusPosition = selectionDirection === 'backward' ? start : end;
+          toolbarPos = getCaretCoordinates(textarea, focusPosition);
+        }
 
-    const { selectionStart, selectionEnd, selectionDirection } = textarea;
-
-    if (selectionStart !== selectionEnd) {
-      const selectedText = content.substring(selectionStart, selectionEnd);
-
-      // Use provided position (from mouse) or calculate from caret (keyboard)
-      let toolbarPos;
-      if (e.type === 'mouseup') {
-        // Mouse selection - use mouse coordinates with offset
-        toolbarPos = { x: e.clientX, y: e.clientY - 15 };
+        updateSelection(start, end, selected, toolbarPos);
       } else {
-        // Keyboard selection - use FOCUS position (the moving cursor)
-        const focusPosition = selectionDirection === 'backward'
-          ? selectionStart
-          : selectionEnd;
-        toolbarPos = getCaretCoordinates(textarea, focusPosition);
+        clearSelection();
       }
+    },
+    [content, updateSelection, clearSelection, getCaretCoordinates]
+  );
 
-      updateSelection(selectionStart, selectionEnd, selectedText, toolbarPos);
-    } else {
-      clearSelection();
-    }
-  }, [content, updateSelection, clearSelection, getCaretCoordinates]);
+  const handleMarkdownRenderSelection = useCallback(
+    (info) => {
+      if (!info || !info.text) {
+        clearSelection();
+        return;
+      }
+      const position = info.position || lastMousePositionRef.current;
+      updateSelection(0, info.text.length, info.text, position);
+    },
+    [updateSelection, clearSelection]
+  );
 
-  const handleMarkdownRenderSelection = useCallback((info) => {
-    if (!info || !info.text) {
-      clearSelection();
-      return;
-    }
-
-    const position = info.position || lastMousePositionRef.current;
-    updateSelection(0, info.text.length, info.text, position);
-  }, [updateSelection, clearSelection]);
-
-  // Track mouse position
   const handleMouseMove = useCallback((e) => {
     lastMousePositionRef.current = { x: e.clientX, y: e.clientY };
   }, []);
 
-  // Handle mouse up to finalize selection
-  const handleMouseUp = useCallback((e) => {
-    // Store mouse position
-    lastMousePositionRef.current = { x: e.clientX, y: e.clientY };
-    
-    // Small delay to ensure selection is complete
-    setTimeout(() => {
-      // Add small offset to move toolbar higher (further from click point to avoid overlapping with text)
-      // ~0.5cm = ~15-20px depending on screen DPI
-      handleSelectionChange({ 
-        x: e.clientX, 
-        y: e.clientY - 15 
-      });
-    }, 10);
-  }, [handleSelectionChange]);
+  const handleMouseUp = useCallback(
+    (e) => {
+      lastMousePositionRef.current = { x: e.clientX, y: e.clientY };
+      setTimeout(() => {
+        handleSelectionChange({ x: e.clientX, y: e.clientY - 15 });
+      }, 10);
+    },
+    [handleSelectionChange]
+  );
 
-  // Handle keyboard-based selection (Shift+arrows)
   const handleKeyUp = useCallback(
     (e) => {
       if (e.shiftKey || e.key === 'Shift') {
-        // Keyboard selection - use caret position
         handleSelectionChange(null);
       }
     },
     [handleSelectionChange]
   );
 
-  // Manual save on Ctrl+S
   const handleKeyDown = (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       if (currentNote) {
-        saveNote(content);
+        saveNote(content).catch(() => {
+          // saveNote already handled error reporting.
+        });
       }
     }
   };
 
-  // Handle operation selection from toolbar
   const handleOperationSelect = useCallback(
     async (operationId, options = {}) => {
       try {
@@ -430,123 +460,177 @@ const NoteEditor = () => {
     ]
   );
 
-  // Insert text at cursor position
-  const insertTextAtCursor = (textToInsert) => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
+  const insertTextAtPlainCursor = useCallback(
+    async (textToInsert, saveImmediately = true) => {
+      const textarea = textareaRef.current;
+      if (!textarea) return null;
 
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const textBefore = content.substring(0, start);
-    const textAfter = content.substring(end);
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const textBefore = content.substring(0, start);
+      const textAfter = content.substring(end);
+      const newContent = textBefore + textToInsert + textAfter;
 
-    const newContent = textBefore + textToInsert + textAfter;
-    setContent(newContent);
+      setContent(newContent);
+      const newCursorPos = start + textToInsert.length;
+      setCursorPosition(newCursorPos);
+      setTimeout(() => {
+        textarea.selectionStart = newCursorPos;
+        textarea.selectionEnd = newCursorPos;
+        textarea.focus();
+      }, 0);
 
-    // Update cursor position
-    const newCursorPos = start + textToInsert.length;
-    setTimeout(() => {
-      textarea.selectionStart = newCursorPos;
-      textarea.selectionEnd = newCursorPos;
-      textarea.focus();
-    }, 0);
-
-    // Save immediately after insertion
-    if (currentNote) {
-      saveNote(newContent);
-    }
-
-    return newCursorPos;
-  };
-
-  const replacePlaceholderInContent = (text, placeholder, replacement, allowEscaped = false) => {
-    if (!placeholder) return text;
-    const escapedPlaceholder = placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = allowEscaped
-      ? new RegExp(`\\\\?${escapedPlaceholder}`)
-      : new RegExp(escapedPlaceholder);
-    return text.replace(pattern, () => replacement);
-  };
-
-  // Handle voice recording start - insert placeholder
-  const handleVoiceRecordingStart = (placeholder) => {
-    if (isMarkdown && markdownEditorRef.current) {
-      markdownEditorRef.current.insertText(placeholder);
-    } else {
-      insertTextAtCursor(placeholder);
-    }
-  };
-
-  // Handle transcription complete - replace placeholder with text
-  const handleTranscriptionComplete = (transcribedText, placeholder) => {
-    if (placeholder) {
-      if (isMarkdown && markdownEditorRef.current) {
-        // For markdown, use the replaceText method
-        markdownEditorRef.current.replaceText(placeholder, transcribedText);
-        // Also update content state and save
-        setContent((prevContent) => {
-          const newContent = replacePlaceholderInContent(
-            prevContent,
-            placeholder,
-            transcribedText,
-            true
-          );
-          if (currentNote) {
-            saveNote(newContent);
-          }
-          return newContent;
-        });
-      } else {
-        // Replace placeholder with transcribed text
-        setContent((prevContent) => {
-          const newContent = replacePlaceholderInContent(
-            prevContent,
-            placeholder,
-            transcribedText
-          );
-          if (currentNote) {
-            saveNote(newContent);
-          }
-          return newContent;
-        });
+      if (saveImmediately && currentNote) {
+        await saveNote(newContent);
       }
-    } else {
-      // No placeholder, just insert at cursor
-      if (isMarkdown && markdownEditorRef.current) {
-        markdownEditorRef.current.insertText(transcribedText);
-      } else {
-        insertTextAtCursor(transcribedText);
-      }
-    }
-  };
+      return newContent;
+    },
+    [content, currentNote, saveNote]
+  );
 
-  // Handle drop events
+  const insertTextAtCurrentCursor = useCallback(
+    async (textToInsert, saveImmediately = true) => {
+      if (isMarkdown && markdownEditorRef.current) {
+        markdownEditorRef.current.insertText(textToInsert);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const latestContent = markdownEditorRef.current?.getContent?.() ?? `${content}${textToInsert}`;
+        setContent(latestContent);
+        if (saveImmediately && currentNote) {
+          await saveNote(latestContent);
+        }
+        return latestContent;
+      }
+      return insertTextAtPlainCursor(textToInsert, saveImmediately);
+    },
+    [content, currentNote, insertTextAtPlainCursor, isMarkdown, saveNote]
+  );
+
+  const replaceMarkerInCurrentNote = useCallback(
+    async (markerToken, replacementText, options = {}) => {
+      const { persist = true } = options;
+      if (!markerToken) return false;
+      let changed = false;
+      let nextContent = '';
+      let matchedMarker = null;
+      setContent((previous) => {
+        const result = replaceMarkerInText(previous, markerToken, replacementText);
+        changed = result.replaced;
+        matchedMarker = result.matchedMarker;
+        nextContent = result.output;
+        return result.output;
+      });
+
+      if (!changed) {
+        return false;
+      }
+
+      if (isMarkdown && markdownEditorRef.current && matchedMarker) {
+        markdownEditorRef.current.replaceText(matchedMarker, replacementText);
+      }
+      if (persist && currentNote && currentNotePathRef.current === currentNote.path) {
+        await saveNote(nextContent, { suppressError: true });
+      }
+      return true;
+    },
+    [currentNote, isMarkdown, saveNote]
+  );
+
+  const generateMarkerToken = useCallback(() => {
+    const uuid =
+      (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    return `[[tx:${uuid}:Transcription ongoing...]]`;
+  }, []);
+
+  const createLaunchAnchor = useCallback(async () => {
+    if (!currentNote?.id) {
+      throw new Error('No active note selected');
+    }
+    const markerToken = generateMarkerToken();
+    await insertTextAtCurrentCursor(markerToken, true);
+    return {
+      noteId: currentNote.id,
+      markerToken,
+    };
+  }, [currentNote, generateMarkerToken, insertTextAtCurrentCursor]);
+
+  const queueAudioForTranscription = useCallback(
+    async (audioFile, launchSource, launchContext = null) => {
+      const context = launchContext || (await createLaunchAnchor());
+      try {
+        return await enqueueAudioJob({
+          audioFile,
+          noteId: context.noteId,
+          markerToken: context.markerToken,
+          launchSource,
+        });
+      } catch (error) {
+        await replaceMarkerInCurrentNote(
+          context.markerToken,
+          '[Error queuing transcription]'
+        );
+        setError('Transcription queue failed: ' + error.message);
+        throw error;
+      }
+    },
+    [createLaunchAnchor, enqueueAudioJob, replaceMarkerInCurrentNote, setError]
+  );
+
+  useEffect(() => {
+    const unsubscribe = subscribeToJobEvents((payload) => {
+      applyCompletedJobToEditor({
+        payload,
+        currentNoteId: currentNote?.id,
+        replaceMarkerInCurrentNote,
+        getNoteById,
+        isMarkdown,
+        markdownEditor: markdownEditorRef.current,
+        traceEvent,
+        setError,
+      });
+    });
+    return unsubscribe;
+  }, [currentNote?.id, getNoteById, isMarkdown, replaceMarkerInCurrentNote, setError, subscribeToJobEvents]);
+
+  useEffect(() => {
+    const unregister = registerInsertAtCursorHandler(async (text) => {
+      if (!currentNote) return false;
+      try {
+        await insertTextAtCurrentCursor(text, true);
+        return true;
+      } catch (error) {
+        setError('Failed to insert transcript: ' + error.message);
+        return false;
+      }
+    });
+    return unregister;
+  }, [currentNote, insertTextAtCurrentCursor, registerInsertAtCursorHandler, setError]);
+
+  const handleRecordingStart = useCallback(async () => {
+    return createLaunchAnchor();
+  }, [createLaunchAnchor]);
+
+  const handleRecordingReady = useCallback(
+    async (audioFile, launchContext) => {
+      await queueAudioForTranscription(audioFile, 'recording', launchContext);
+    },
+    [queueAudioForTranscription]
+  );
+
   const handleDrop = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-
-    // Reset dragging state
     setIsDraggingOver(false);
 
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
 
-    // Capture note path at drop time to avoid stale closure during long transcriptions
-    const notePathAtDrop = currentNote?.path;
-    const isMarkdownAtDrop = isMarkdown;
-
-    // For txt files: Use the existing cursor position (where user clicked before dragging)
-    // Don't try to calculate from drop coordinates as it's inaccurate
-    // For md files: Capture cursor position before overlay interaction
-    let savedCursorPosition = cursorPosition;
-
     if (!isMarkdown) {
       const textarea = textareaRef.current;
       if (textarea) {
-        // Save the current cursor position before any focus changes
-        savedCursorPosition = textarea.selectionStart;
+        const savedCursorPosition = textarea.selectionStart || cursorPosition;
         textarea.focus();
-        // Restore cursor position
         textarea.selectionStart = savedCursorPosition;
         textarea.selectionEnd = savedCursorPosition;
       }
@@ -554,93 +638,11 @@ const NoteEditor = () => {
 
     for (const file of files) {
       try {
-        // Handle text files
         if (file.name.endsWith('.txt')) {
           const textContent = await file.text();
-          if (isMarkdownAtDrop && markdownEditorRef.current) {
-            // insertText will call onChange which updates content state
-            markdownEditorRef.current.insertText(textContent);
-            // Save after a short delay to allow onChange to propagate
-            setTimeout(() => {
-              if (notePathAtDrop) {
-                const latestContent = markdownEditorRef.current?.getContent() || content;
-                updateNote(notePathAtDrop, latestContent).catch((err) => {
-                  setError('Failed to save: ' + err.message);
-                });
-              }
-            }, 100);
-          } else {
-            insertTextAtCursor(textContent);
-          }
-        }
-        // Handle audio files
-        else if (file.type.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|opus|flac|webm)$/i.test(file.name)) {
-          // Insert placeholder
-          const placeholder = `[🎙️ Transcribing...]`;
-
-          if (isMarkdownAtDrop && markdownEditorRef.current) {
-            // insertText will call onChange which updates content state
-            markdownEditorRef.current.insertText(placeholder);
-            // Save after a short delay to allow onChange to propagate
-            setTimeout(() => {
-              if (notePathAtDrop) {
-                // Get the latest content from the editor
-                const latestContent = markdownEditorRef.current?.getContent() || content;
-                updateNote(notePathAtDrop, latestContent).catch((err) => {
-                  console.error('Failed to save placeholder:', err);
-                });
-              }
-            }, 100);
-          } else {
-            insertTextAtCursor(placeholder);
-          }
-
-          setIsTranscribing(true);
-
-          try {
-            // Transcribe audio
-            const result = await transcriptionApi.transcribeAudio(file);
-
-            // Replace placeholder with transcribed text
-            // Use captured notePathAtDrop to avoid stale closure issues
-            setContent((prevContent) => {
-              const newContent = replacePlaceholderInContent(
-                prevContent,
-                placeholder,
-                result.text,
-                isMarkdownAtDrop
-              );
-              // Save using captured path, not current note reference
-              if (notePathAtDrop) {
-                updateNote(notePathAtDrop, newContent).catch((err) => {
-                  setError('Failed to save transcription: ' + err.message);
-                });
-              }
-              return newContent;
-            });
-
-            // Also update MDXEditor if still on markdown
-            if (isMarkdownAtDrop && markdownEditorRef.current) {
-              markdownEditorRef.current.replaceText(placeholder, result.text);
-            }
-          } catch (transcriptionError) {
-            // Replace placeholder with error message
-            const errorText = `[Error transcribing audio]`;
-            setContent((prevContent) =>
-              replacePlaceholderInContent(
-                prevContent,
-                placeholder,
-                errorText,
-                isMarkdownAtDrop
-              )
-            );
-            if (isMarkdownAtDrop && markdownEditorRef.current) {
-              markdownEditorRef.current.replaceText(placeholder, errorText);
-            }
-            setError('Transcription failed: ' + transcriptionError.message);
-          } finally {
-            setIsTranscribing(false);
-          }
+          await insertTextAtCurrentCursor(textContent, true);
+        } else if (file.type.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|opus|flac|webm)$/i.test(file.name)) {
+          await queueAudioForTranscription(file, 'drop');
         } else {
           setError(`Unsupported file type: ${file.name}`);
         }
@@ -653,7 +655,6 @@ const NoteEditor = () => {
   const handleDragOver = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    // Enable drop visual feedback
     e.dataTransfer.dropEffect = 'copy';
     if (isMarkdown && !isDraggingOver) {
       setIsDraggingOver(true);
@@ -663,7 +664,6 @@ const NoteEditor = () => {
   const handleDragLeave = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    // Only set to false if we're leaving the container entirely
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX;
     const y = e.clientY;
@@ -682,7 +682,6 @@ const NoteEditor = () => {
     );
   }
 
-  // Get available operations for current selection
   const availableOperations = hasSelection ? getAvailableOperations() : [];
 
   return (
@@ -701,10 +700,7 @@ const NoteEditor = () => {
         onDragLeave={isMarkdown ? handleDragLeave : undefined}
       >
         {isMarkdown ? (
-          <div
-            ref={markdownDropZoneRef}
-            className="markdown-drop-zone"
-          >
+          <div ref={markdownDropZoneRef} className="markdown-drop-zone">
             <MarkdownEditor
               key={currentNote?.path}
               ref={markdownEditorRef}
@@ -715,7 +711,6 @@ const NoteEditor = () => {
               onSourceSelection={handleMarkdownSourceSelection}
               onRenderSelection={handleMarkdownRenderSelection}
             />
-            {/* Drop overlay - captures drop events before MDXEditor */}
             {isDraggingOver && (
               <div
                 className="markdown-drop-overlay"
@@ -746,7 +741,6 @@ const NoteEditor = () => {
           />
         )}
 
-        {/* Selection Toolbar */}
         {hasSelection && isToolbarVisible && availableOperations.length > 0 && (
           <SelectionToolbar
             position={toolbarPosition}
@@ -758,11 +752,10 @@ const NoteEditor = () => {
           />
         )}
 
+        <TranscriptionJobsPanel />
         <VoiceRecorder
-          onRecordingStart={handleVoiceRecordingStart}
-          onTranscriptionComplete={handleTranscriptionComplete}
-          onTranscriptionStart={() => setIsTranscribing(true)}
-          onTranscriptionEnd={() => setIsTranscribing(false)}
+          onRecordingStart={handleRecordingStart}
+          onRecordingReady={handleRecordingReady}
           onError={setError}
           disabled={!currentNote}
         />

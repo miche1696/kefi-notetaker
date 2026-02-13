@@ -47,6 +47,8 @@ notes/*
 notes/*
 notes_backup/*
 uploads/*
+backend/state/*.json
+backend/state/*.jsonl
 
 # Auto Claude data directory
 .auto-claude/

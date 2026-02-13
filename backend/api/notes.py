@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.exceptions import BadRequest
+from services.note_service import RevisionConflictError
 
 notes_bp = Blueprint('notes', __name__)
 
@@ -41,6 +42,21 @@ def get_note(note_path):
         note = note_service.get_note(note_path)
         return jsonify(note), 200
 
+    except FileNotFoundError as e:
+        return jsonify({'error': str(e)}), 404
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+
+
+@notes_bp.route('/id/<note_id>', methods=['GET'])
+def get_note_by_id(note_id):
+    """Get a specific note by stable note id."""
+    try:
+        note_service = current_app.config['NOTE_SERVICE']
+        note = note_service.get_note_by_id(note_id)
+        return jsonify(note), 200
     except FileNotFoundError as e:
         return jsonify({'error': str(e)}), 404
     except ValueError as e:
@@ -102,16 +118,53 @@ def update_note(note_path):
         if content is None:
             return jsonify({'error': 'Content is required'}), 400
 
+        expected_revision = data.get('expected_revision')
+        if expected_revision is None:
+            return jsonify({'error': 'expected_revision is required'}), 400
+
         # Update note
-        note = note_service.update_note(note_path, content)
+        note = note_service.update_note(note_path, content, expected_revision)
 
         return jsonify(note), 200
 
     except FileNotFoundError as e:
         return jsonify({'error': str(e)}), 404
+    except RevisionConflictError as e:
+        return jsonify({
+            'error': 'Revision conflict',
+            'note_id': e.note_id,
+            'expected_revision': e.expected_revision,
+            'current_revision': e.current_revision,
+        }), 409
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except BadRequest as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+
+
+@notes_bp.route('/id/<note_id>/replace-marker', methods=['PATCH'])
+def replace_marker(note_id):
+    """Replace a marker token in the latest note content."""
+    try:
+        note_service = current_app.config['NOTE_SERVICE']
+
+        data = request.get_json()
+        if not data:
+            raise BadRequest("Request body must be JSON")
+
+        marker_token = data.get('marker_token')
+        replacement_text = data.get('replacement_text')
+        if marker_token is None or replacement_text is None:
+            return jsonify({'error': 'marker_token and replacement_text are required'}), 400
+
+        result = note_service.replace_marker(note_id, marker_token, replacement_text)
+        return jsonify(result), 200
+
+    except BadRequest as e:
+        return jsonify({'error': str(e)}), 400
+    except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500

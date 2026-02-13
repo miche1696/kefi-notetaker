@@ -4,6 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test:markers": "node tests/transcriptionMarkers.test.mjs",
+    "test:markdown-sync": "node tests/markdownExternalSync.test.mjs",
+    "test:tx-apply": "node tests/transcriptionApplyFlow.test.mjs",
+    "test:unit": "npm run test:markers && npm run test:markdown-sync && npm run test:tx-apply",
     "build": "vite build",
     "preview": "vite preview"
   },

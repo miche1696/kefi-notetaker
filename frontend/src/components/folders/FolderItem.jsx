@@ -2,13 +2,21 @@ import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useNotes } from '../../context/NotesContext';
 import { useApp } from '../../context/AppContext';
-import { transcriptionApi } from '../../api/transcription';
+import { useTranscriptionJobs } from '../../context/TranscriptionJobsContext';
 import NoteItem from './NoteItem';
 import './FolderItem.css';
 
 const sortByName = (items) => {
   if (!items) return [];
   return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+};
+
+const buildMarkerToken = () => {
+  const uuid =
+    (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  return `[[tx:${uuid}:Transcription ongoing...]]`;
 };
 
 // Invalid characters for folder names
@@ -27,7 +35,8 @@ const FolderItem = ({ folder, level = 0, onClearRootDragOver }) => {
   const [showNoteSubmenu, setShowNoteSubmenu] = useState(false);
   const [submenuSide, setSubmenuSide] = useState('right');
   const menuRef = useRef(null);
-  const { createNote, createFolder, refreshFolders, moveNote, moveFolder, renameFolder } = useNotes();
+  const { createNote, createFolder, refreshFolders, moveNote, moveFolder, renameFolder, updateNote } = useNotes();
+  const { enqueueAudioJob } = useTranscriptionJobs();
   const { setError } = useApp();
 
   const isRootFolder = level === 0 && folder.path === '';
@@ -253,9 +262,27 @@ const FolderItem = ({ folder, level = 0, onClearRootDragOver }) => {
         }
         // Check if it's an audio file
         else if (file.type.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|opus|flac|webm)$/i.test(file.name)) {
-          // Transcribe audio
-          const result = await transcriptionApi.transcribeAudio(file);
-          await createNote(fileName, folder.path, result.text);
+          const markerToken = buildMarkerToken();
+          const note = await createNote(fileName, folder.path, markerToken);
+          try {
+            await enqueueAudioJob({
+              audioFile: file,
+              noteId: note.id,
+              markerToken,
+              launchSource: 'folder_drop',
+            });
+          } catch (error) {
+            const fallbackContent = (note.content || markerToken).replace(
+              markerToken,
+              '[Error queuing transcription]'
+            );
+            try {
+              await updateNote(note.path, fallbackContent, note.revision);
+            } catch (_) {
+              // Best effort to avoid leaving a stale marker when queueing fails.
+            }
+            throw error;
+          }
         } else {
           setError(`Unsupported file type: ${file.name}`);
         }

@@ -7,10 +7,12 @@ A simple, Apple Notes-like application with local audio transcription using Whis
 - 📝 **Plain text editing** with standard keyboard shortcuts (Ctrl+C, Ctrl+V, Ctrl+Z)
 - 📁 **Nested folder organization** with drag-and-drop support
 - 🎙️ **Audio transcription** using local Whisper model
+- 🧵 **Background transcription queue** anchored to launch position (works while you keep editing/navigating)
+- 📋 **Transcription jobs panel** (history, status, open target, copy raw transcript, insert at cursor, cancel/resume)
 - 📄 **Drag & drop files**:
   - Drop text files on folders to create new notes
   - Drop text files in editor to insert at cursor position
-  - Drop audio files for instant transcription
+  - Drop audio files to queue background transcription jobs
 - 💾 **Auto-save** functionality (500ms debounce)
 - 🎨 **Clean, minimal UI** inspired by Apple Notes
 
@@ -137,6 +139,15 @@ The frontend will start on `http://localhost:5173`
 
 Open your browser to `http://localhost:5173` to use the application.
 
+## Testing
+
+- Full suite (backend tests + frontend build + smoke): `python3 tools/test_suite.py --base http://localhost:5001`
+- Core suite without running backend: `python3 tools/test_suite.py --skip-smoke`
+- Frontend unit tests (marker replacement + markdown external sync): `cd frontend && npm run test:unit`
+- Smoke only: `python3 tools/smoke.py --base http://localhost:5001`
+
+Note: the smoke test requires backend to be running.
+
 ## Usage
 
 ### Creating Notes
@@ -155,19 +166,22 @@ Open your browser to `http://localhost:5173` to use the application.
 
 **Create New Note (Drop on Folder Tree):**
 - Drag a `.txt` file onto a folder → Creates new note with file content
-- Drag an audio file onto a folder → Transcribes and creates new note
+- Drag an audio file onto a folder → Creates note with marker and queues transcription in background
 
 **Insert Content (Drop in Editor):**
 - Drag a `.txt` file into the editor → Inserts content at cursor position
-- Drag an audio file into the editor → Shows `[🎙️ Transcribing...]` placeholder, then inserts transcribed text
+- Drag an audio file into the editor → Inserts marker token and queues transcription
 
 ### Audio Transcription
 
 **Supported formats:** `.mp3`, `.wav`, `.m4a`, `.ogg`, `.opus`, `.flac`, `.webm` (including WhatsApp `.opus` audio exports)
 
 1. Drag an audio file onto the editor or folder
-2. Wait for transcription (shown with loading indicator)
-3. Transcribed text appears automatically
+2. Continue editing or switch notes while jobs run in background
+3. Open the transcription jobs panel (`↺` near microphone) to monitor/copy/insert/resume jobs
+4. Transcribed text replaces its original marker automatically when ready
+5. Whisper inference on the backend is serialized per model instance to avoid concurrency-related tensor-shape crashes under parallel jobs
+6. If transcription fails permanently, the marker is replaced with a short failure placeholder (`[Transcription failed: ...]`) so tokens are not left in notes
 
 ### Keyboard Shortcuts
 
@@ -189,7 +203,8 @@ PROJECT_ME/
 │   ├── requirements.txt       # Python dependencies
 │   ├── api/                   # REST API endpoints
 │   ├── services/              # Business logic
-│   └── models/                # Data models
+│   ├── models/                # Data models
+│   └── state/                 # Settings + note index + transcription job snapshot/events
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.js
@@ -214,6 +229,11 @@ NOTES_DIR=../notes
 UPLOADS_DIR=../uploads
 WHISPER_MODEL=base            # Options: tiny, base, small, medium, large
 MAX_AUDIO_SIZE_MB=100
+DEFAULT_MAX_CONCURRENT_JOBS=2
+DEFAULT_MAX_QUEUED_JOBS=50
+DEFAULT_JOB_RETRY_MAX=2
+DEFAULT_JOB_RETRY_BASE_MS=1500
+DEFAULT_AUTO_REQUEUE_INTERRUPTED=true
 ```
 
 **Whisper Models:**
@@ -235,8 +255,10 @@ VITE_API_URL=http://localhost:5001
 
 - `GET /api/notes` - List all notes
 - `GET /api/notes/<path>` - Get note content
+- `GET /api/notes/id/<note_id>` - Get note by stable id
 - `POST /api/notes` - Create note
-- `PUT /api/notes/<path>` - Update note
+- `PUT /api/notes/<path>` - Update note (requires `expected_revision`)
+- `PATCH /api/notes/id/<note_id>/replace-marker` - Atomic marker replacement
 - `DELETE /api/notes/<path>` - Delete note
 - `PATCH /api/notes/<path>/rename` - Rename note
 
@@ -250,8 +272,19 @@ VITE_API_URL=http://localhost:5001
 ### Transcription
 
 - `POST /api/transcription/audio` - Upload and transcribe audio
+- `POST /api/transcription/jobs` - Create async transcription job (audio + `note_id` + `marker_token`)
+- `GET /api/transcription/jobs` - List jobs
+- `GET /api/transcription/jobs/<job_id>` - Get job details
+- `POST /api/transcription/jobs/<job_id>/cancel` - Cancel job
+- `POST /api/transcription/jobs/<job_id>/resume` - Resume interrupted job
+- `POST /api/transcription/jobs/resume-interrupted` - Resume all interrupted jobs
 - `GET /api/transcription/formats` - Get supported formats
 - Supported upload extensions include `.opus` (WhatsApp audio exports)
+
+### Settings
+
+- `GET /api/settings` - Get runtime settings
+- `PUT /api/settings` - Update settings (`transcription.max_concurrent_jobs`, queue/retry/history limits)
 
 ## Troubleshooting
 
@@ -264,6 +297,16 @@ cd backend
 source venv/bin/activate
 python -c "import whisper; whisper.load_model('base', download_root='./models')"
 ```
+
+### Whisper Runtime Concurrency Errors
+
+If you previously saw errors like `size of tensor a ... must match ...`, update to the latest code and restart the backend.
+The service now serializes shared-model Whisper inference to prevent these parallel execution races.
+
+### Whisper Transcription Failures
+
+If Whisper fails after retries, the note marker is auto-replaced with `[Transcription failed: ...]`.
+The job remains `failed` in the transcription panel, so you can still inspect the error and retry with another file if needed.
 
 ### FFmpeg Not Found
 

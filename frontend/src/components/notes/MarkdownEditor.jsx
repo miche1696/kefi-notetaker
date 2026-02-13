@@ -24,6 +24,7 @@ import {
 } from '@mdxeditor/editor';
 import '@mdxeditor/editor/style.css';
 import './MarkdownEditor.css';
+import { shouldSyncExternalMarkdown } from '../../utils/markdownExternalSync';
 
 // Line numbers component that handles wrapped lines
 const LineNumbers = ({ content, containerRef, scrollTop }) => {
@@ -135,7 +136,38 @@ const MarkdownEditor = forwardRef(({
   const renderContainerRef = useRef(null);
   const renderSelectionRangeRef = useRef(null);
   const prevModeRef = useRef(mode);
+  const lastEditorMarkdownRef = useRef(initialContent !== undefined ? initialContent : (content || ''));
+  const isApplyingExternalMarkdownRef = useRef(false);
+  const externalSyncResetRef = useRef(null);
   const [scrollTop, setScrollTop] = useState(0);
+
+  const scheduleExternalSyncReset = useCallback(() => {
+    if (externalSyncResetRef.current) {
+      clearTimeout(externalSyncResetRef.current);
+    }
+    externalSyncResetRef.current = setTimeout(() => {
+      isApplyingExternalMarkdownRef.current = false;
+      externalSyncResetRef.current = null;
+    }, 0);
+  }, []);
+
+  const applyExternalMarkdown = useCallback((nextMarkdown) => {
+    const editor = editorRef.current;
+    if (!editor) {
+      return false;
+    }
+    const targetMarkdown = nextMarkdown || '';
+    const currentMarkdown = editor.getMarkdown();
+    if (currentMarkdown === targetMarkdown) {
+      lastEditorMarkdownRef.current = targetMarkdown;
+      return false;
+    }
+    isApplyingExternalMarkdownRef.current = true;
+    editor.setMarkdown(targetMarkdown);
+    lastEditorMarkdownRef.current = targetMarkdown;
+    scheduleExternalSyncReset();
+    return true;
+  }, [scheduleExternalSyncReset]);
 
   // Expose methods to parent component
   const restoreSelectionAfterInsert = useCallback((insertedText) => {
@@ -268,18 +300,23 @@ const MarkdownEditor = forwardRef(({
         // Use setTimeout to allow MDXEditor to update
         setTimeout(() => {
           const contentAfter = editorRef.current.getMarkdown();
+          lastEditorMarkdownRef.current = contentAfter;
           if (contentAfter === contentBefore) {
             if (!hasSelectionInEditor) {
               // Insertion didn't work (no cursor position), append to end
               const newContent = (content || '') + text;
+              lastEditorMarkdownRef.current = newContent;
               onChange(newContent);
+              isApplyingExternalMarkdownRef.current = true;
               editorRef.current.setMarkdown(newContent);
+              scheduleExternalSyncReset();
             }
           }
         }, 50);
       } else {
         // Fallback: append to end if no editor ref available
         const newContent = (content || '') + text;
+        lastEditorMarkdownRef.current = newContent;
         onChange(newContent);
       }
     },
@@ -307,45 +344,62 @@ const MarkdownEditor = forwardRef(({
     },
     replaceText: (oldText, newText) => {
       if (!oldText) {
-        return;
+        return false;
       }
-      const escapedOldText = oldText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(`\\\\?${escapedOldText}`);
-      const newContent = (content || '').replace(pattern, () => newText);
-      onChange(newContent);
+      const source = mode === 'render' && editorRef.current
+        ? editorRef.current.getMarkdown()
+        : (content || '');
+      if (!source.includes(oldText)) {
+        return false;
+      }
+      const newContent = source.replace(oldText, newText);
       if (mode === 'render' && editorRef.current) {
+        isApplyingExternalMarkdownRef.current = true;
         editorRef.current.setMarkdown(newContent);
+        scheduleExternalSyncReset();
+      }
+      lastEditorMarkdownRef.current = newContent;
+      return true;
+    },
+    syncExternalContent: (nextContent) => {
+      if (mode === 'render') {
+        applyExternalMarkdown(nextContent || '');
       }
     },
-    getContent: () => content,
+    getContent: () => (mode === 'render' && editorRef.current ? editorRef.current.getMarkdown() : content),
     // Expose textareaRef for source mode operations
     getTextareaRef: () => textareaRef,
-  }), [mode, content, onChange]);
+  }), [mode, content, onChange, applyExternalMarkdown, scheduleExternalSyncReset]);
 
-  // Sync content to MDXEditor when switching from source mode back to render mode
-  // IMPORTANT: We intentionally DO NOT sync content from props to the editor during normal editing.
-  // The MDXEditor maintains its own internal state, and calling setMarkdown() resets the cursor position.
-  // We only sync when:
-  // 1. Switching from source mode back to render mode (the editor might have stale content)
-  // 2. Note changes are handled by the key prop in parent causing a full remount
+  // Keep render-mode editor in sync for external updates (job apply, note reload, mode switch),
+  // while avoiding setMarkdown churn on user typing updates coming from this same editor.
   useEffect(() => {
     const switchedToRender = mode === 'render' && prevModeRef.current === 'source';
     prevModeRef.current = mode;
+    const targetMarkdown = content || '';
 
-    if (switchedToRender && editorRef.current) {
-      // User switched from source mode to render mode - sync the content
-      const currentMarkdown = editorRef.current.getMarkdown();
-      if (currentMarkdown !== content) {
-        editorRef.current.setMarkdown(content || '');
-      }
+    if (!shouldSyncExternalMarkdown({
+      mode,
+      switchedToRender,
+      content: targetMarkdown,
+      lastEditorMarkdown: lastEditorMarkdownRef.current,
+    })) {
+      return;
     }
-    // Note: We intentionally do NOT sync on content changes during normal editing
-    // because calling setMarkdown() resets the cursor position
-  }, [content, mode]);
+
+    applyExternalMarkdown(targetMarkdown);
+  }, [applyExternalMarkdown, content, mode]);
 
   const handleEditorChange = useCallback((newMarkdown) => {
+    lastEditorMarkdownRef.current = newMarkdown;
+    if (isApplyingExternalMarkdownRef.current) {
+      return;
+    }
+    if (newMarkdown === content) {
+      return;
+    }
     onChange(newMarkdown);
-  }, [onChange]);
+  }, [content, onChange]);
 
   const handleTextareaChange = useCallback((e) => {
     onChange(e.target.value);
@@ -353,6 +407,13 @@ const MarkdownEditor = forwardRef(({
 
   const handleScroll = useCallback((e) => {
     setScrollTop(e.target.scrollTop);
+  }, []);
+
+  useEffect(() => () => {
+    if (externalSyncResetRef.current) {
+      clearTimeout(externalSyncResetRef.current);
+      externalSyncResetRef.current = null;
+    }
   }, []);
 
   // Handle selection events for source mode

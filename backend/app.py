@@ -5,15 +5,19 @@ import uuid
 import config
 from services.file_service import FileService
 from services.note_service import NoteService
+from services.note_index_service import NoteIndexService
 from services.folder_service import FolderService
 from services.whisper_service import WhisperService
 from services.text_processing_service import TextProcessingService
 from services.openai_client import OpenAIClient
+from services.settings_service import SettingsService
+from services.transcription_job_service import TranscriptionJobService
 from api.notes import notes_bp
 from api.folders import folders_bp
 from api.transcription import transcription_bp
 from api.text_processing import text_processing_bp
 from api.trace import trace_bp
+from api.settings import settings_bp
 from utils.trace import TraceLogger
 
 
@@ -41,8 +45,11 @@ def create_app():
 
     # Initialize services
     file_service = FileService(config.NOTES_DIR, trace_logger=trace_logger)
-    note_service = NoteService(file_service)
+    settings_service = SettingsService(config.SETTINGS_PATH, trace_logger=trace_logger)
+    note_index_service = NoteIndexService(config.NOTE_INDEX_PATH, trace_logger=trace_logger)
+    note_service = NoteService(file_service, note_index_service, trace_logger=trace_logger)
     folder_service = FolderService(file_service)
+    note_service.sync_index()
 
     # Initialize Whisper service (this may take a moment to load the model)
     print("Initializing Whisper service...")
@@ -61,12 +68,23 @@ def create_app():
             trace_logger=trace_logger,
         )
     text_processing_service = TextProcessingService(llm_client=llm_client)
+    transcription_job_service = TranscriptionJobService(
+        whisper_service=whisper_service,
+        note_service=note_service,
+        settings_service=settings_service,
+        snapshot_path=config.TRANSCRIPTION_JOBS_SNAPSHOT_PATH,
+        events_path=config.TRANSCRIPTION_JOBS_EVENTS_PATH,
+        trace_logger=trace_logger,
+    )
 
     # Store services in app config for access in routes
     app.config['FILE_SERVICE'] = file_service
+    app.config['SETTINGS_SERVICE'] = settings_service
+    app.config['NOTE_INDEX_SERVICE'] = note_index_service
     app.config['NOTE_SERVICE'] = note_service
     app.config['FOLDER_SERVICE'] = folder_service
     app.config['WHISPER_SERVICE'] = whisper_service
+    app.config['TRANSCRIPTION_JOB_SERVICE'] = transcription_job_service
     app.config['TEXT_PROCESSING_SERVICE'] = text_processing_service
     app.config['TRACE_LOGGER'] = trace_logger
     app.config['FRONTEND_TRACE_LOGGER'] = frontend_trace_logger
@@ -77,6 +95,7 @@ def create_app():
     app.register_blueprint(transcription_bp, url_prefix='/api/transcription')
     app.register_blueprint(text_processing_bp, url_prefix='/api/text')
     app.register_blueprint(trace_bp, url_prefix='/api/trace')
+    app.register_blueprint(settings_bp, url_prefix='/api/settings')
 
     @app.before_request
     def start_request_timer():
@@ -152,6 +171,7 @@ def create_app():
                 'folders': '/api/folders',
                 'transcription': '/api/transcription',
                 'text': '/api/text',
+                'settings': '/api/settings',
                 'health': '/api/health'
             }
         }), 200
