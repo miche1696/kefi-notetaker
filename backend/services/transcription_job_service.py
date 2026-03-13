@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from utils.trace import RetainedJsonlWriter
+
 
 TERMINAL_STATUSES = {"completed", "failed", "orphaned", "cancelled"}
 
@@ -36,6 +38,7 @@ class TranscriptionJobService:
         self.settings_service = settings_service
         self.snapshot_path = Path(snapshot_path)
         self.events_path = Path(events_path)
+        self.events_writer = RetainedJsonlWriter(self.events_path, safe=False)
         self.trace_logger = trace_logger
         self.worker_slots = max(1, min(16, int(worker_slots)))
 
@@ -87,15 +90,13 @@ class TranscriptionJobService:
         tmp_path.replace(self.snapshot_path)
 
     def _append_event(self, event: str, data: Dict) -> None:
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "ts": _now_ts(),
             "iso": _utc_now(),
             "event": event,
             "data": data,
         }
-        with self.events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self.events_writer.append(payload)
 
     def _save(self, event: Optional[str] = None, data: Optional[Dict] = None) -> None:
         self._state["updated_at"] = _utc_now()

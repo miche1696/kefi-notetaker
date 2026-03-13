@@ -135,6 +135,8 @@ const MarkdownEditor = forwardRef(({
   const textareaRef = useRef(null);
   const renderContainerRef = useRef(null);
   const renderSelectionRangeRef = useRef(null);
+  const pendingToolbarSelectionRestoreRef = useRef(null);
+  const pendingToolbarRestoreTimeoutRef = useRef(null);
   const prevModeRef = useRef(mode);
   const lastEditorMarkdownRef = useRef(initialContent !== undefined ? initialContent : (content || ''));
   const isApplyingExternalMarkdownRef = useRef(false);
@@ -390,17 +392,6 @@ const MarkdownEditor = forwardRef(({
     applyExternalMarkdown(targetMarkdown);
   }, [applyExternalMarkdown, content, mode]);
 
-  const handleEditorChange = useCallback((newMarkdown) => {
-    lastEditorMarkdownRef.current = newMarkdown;
-    if (isApplyingExternalMarkdownRef.current) {
-      return;
-    }
-    if (newMarkdown === content) {
-      return;
-    }
-    onChange(newMarkdown);
-  }, [content, onChange]);
-
   const handleTextareaChange = useCallback((e) => {
     onChange(e.target.value);
   }, [onChange]);
@@ -409,10 +400,124 @@ const MarkdownEditor = forwardRef(({
     setScrollTop(e.target.scrollTop);
   }, []);
 
+  const isToolbarInteractionTarget = useCallback((target) => {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    return Boolean(
+      target.closest('.mdxeditor-toolbar') ||
+      target.closest('[data-toolbar-item]') ||
+      target.closest('[data-editor-dropdown]') ||
+      target.closest('.mdxeditor-select-content')
+    );
+  }, []);
+
+  const captureSelectionBeforeToolbarAction = useCallback(() => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      pendingToolbarSelectionRestoreRef.current = null;
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    const contentEditable = renderContainerRef.current?.querySelector('[contenteditable="true"]');
+    if (!contentEditable) {
+      pendingToolbarSelectionRestoreRef.current = null;
+      return;
+    }
+
+    const anchorNode = selection.anchorNode;
+    const focusNode = selection.focusNode;
+    const isInsideEditor =
+      (anchorNode && contentEditable.contains(anchorNode)) ||
+      (focusNode && contentEditable.contains(focusNode));
+    if (!isInsideEditor) {
+      pendingToolbarSelectionRestoreRef.current = null;
+      return;
+    }
+
+    pendingToolbarSelectionRestoreRef.current = {
+      range: range.cloneRange(),
+      scrollTop: renderContainerRef.current?.scrollTop || 0,
+      expiresAt: Date.now() + 1200,
+    };
+  }, []);
+
+  const restoreSelectionAfterToolbarAction = useCallback(() => {
+    const pending = pendingToolbarSelectionRestoreRef.current;
+    pendingToolbarSelectionRestoreRef.current = null;
+    if (!pending || Date.now() > pending.expiresAt) {
+      return;
+    }
+
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    const contentEditable = renderContainerRef.current?.querySelector('[contenteditable="true"]');
+    if (!contentEditable) {
+      return;
+    }
+
+    try {
+      selection.removeAllRanges();
+      selection.addRange(pending.range);
+      contentEditable.focus();
+      if (renderContainerRef.current && typeof pending.scrollTop === 'number') {
+        renderContainerRef.current.scrollTop = pending.scrollTop;
+      }
+    } catch (error) {
+      // Node replacement can invalidate cloned DOM ranges; skip restore in that case.
+    }
+  }, []);
+
+  const handleRenderPointerDownCapture = useCallback((event) => {
+    if (mode !== 'render') {
+      pendingToolbarSelectionRestoreRef.current = null;
+      return;
+    }
+
+    if (!isToolbarInteractionTarget(event.target)) {
+      pendingToolbarSelectionRestoreRef.current = null;
+      return;
+    }
+
+    captureSelectionBeforeToolbarAction();
+
+    if (pendingToolbarRestoreTimeoutRef.current) {
+      clearTimeout(pendingToolbarRestoreTimeoutRef.current);
+    }
+    pendingToolbarRestoreTimeoutRef.current = setTimeout(() => {
+      pendingToolbarSelectionRestoreRef.current = null;
+      pendingToolbarRestoreTimeoutRef.current = null;
+    }, 1500);
+  }, [captureSelectionBeforeToolbarAction, isToolbarInteractionTarget, mode]);
+
+  const handleEditorChange = useCallback((newMarkdown) => {
+    lastEditorMarkdownRef.current = newMarkdown;
+    if (isApplyingExternalMarkdownRef.current) {
+      return;
+    }
+    if (pendingToolbarSelectionRestoreRef.current) {
+      setTimeout(() => {
+        restoreSelectionAfterToolbarAction();
+      }, 0);
+    }
+    if (newMarkdown === content) {
+      return;
+    }
+    onChange(newMarkdown);
+  }, [content, onChange, restoreSelectionAfterToolbarAction]);
+
   useEffect(() => () => {
     if (externalSyncResetRef.current) {
       clearTimeout(externalSyncResetRef.current);
       externalSyncResetRef.current = null;
+    }
+    if (pendingToolbarRestoreTimeoutRef.current) {
+      clearTimeout(pendingToolbarRestoreTimeoutRef.current);
+      pendingToolbarRestoreTimeoutRef.current = null;
     }
   }, []);
 
@@ -476,9 +581,12 @@ const MarkdownEditor = forwardRef(({
   }, [onRenderSelection]);
 
   const handleRenderMouseUp = useCallback((e) => {
+    if (isToolbarInteractionTarget(e.target)) {
+      return;
+    }
     // Small delay to ensure selection is finalized
     setTimeout(() => reportRenderSelection(e), 0);
-  }, [reportRenderSelection]);
+  }, [isToolbarInteractionTarget, reportRenderSelection]);
 
   const handleRenderKeyUp = useCallback((e) => {
     if (e.shiftKey || e.key === 'Shift') {
@@ -522,6 +630,7 @@ const MarkdownEditor = forwardRef(({
       <div
         ref={renderContainerRef}
         className="mdx-editor-scroll-wrapper"
+        onPointerDownCapture={handleRenderPointerDownCapture}
         onMouseUp={handleRenderMouseUp}
         onKeyUp={handleRenderKeyUp}
       >
